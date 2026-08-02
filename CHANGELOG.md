@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 2026-08-02
+
+- Added a validated, backup-first script self-update command.
+- Added guarded automated update checks using a persistent systemd timer.
+- Added opt-in weekly package installation with disk, dpkg, APT, and cluster-quorum checks.
+- Added update locking, logging, log rotation, status display, and run-now controls.
+- Kept automatic reboot disabled and made check-only mode the recommended default.
+- Published the update worker as a separately reviewable script.
+- Extended Bash syntax and ShellCheck validation to the update worker.
+
+
 ## 0.2.0 — 2026-08-02
 
 - Added interactive host health checks.
