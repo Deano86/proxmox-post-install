@@ -9,7 +9,11 @@ and is distributed under the MIT License with attribution preserved.
 
 ## Features
 
-- Read-only audit mode.
+- Read-only configuration audit and host health checks.
+- Dry-run menu that previews changes without writing.
+- PVE 9 legacy-to-deb822 repository migration with APT validation.
+- Restorable repository backups with path-validated manifests.
+- Mode-0600 diagnostic report export with a sharing warning.
 - Runtime PVE version, Debian codename, and architecture detection.
 - PVE 8 legacy `.list` and PVE 9 deb822 `.sources` support.
 - Repository backups and automatic rollback when `apt-get update` fails.
@@ -40,17 +44,36 @@ sudo ./proxmox-post-install.sh
 Avoid piping a remote script directly into a root shell. Saving it first lets
 you inspect and syntax-check exactly what will run.
 
-## Read-only audit
+## Useful commands
 
 ```bash
+# Interactive menu
+sudo ./proxmox-post-install.sh
+
+# Preview interactive changes without writing
+sudo ./proxmox-post-install.sh --dry-run
+
+# Configuration audit
 sudo ./proxmox-post-install.sh --audit
+
+# Host health checks
+sudo ./proxmox-post-install.sh --health
+
+# Create /root/proxmox-diagnostic-*.txt with mode 0600
+sudo ./proxmox-post-install.sh --report
 ```
+
+The diagnostic report intentionally excludes guest configuration files,
+subscription keys, and journal logs. It includes interface IP addresses, so
+review it before sharing.
 
 ## Safety model
 
 - Repository changes are scoped to entries selected in the interactive menu.
 - Every changed repository file is copied to
-  `/var/backups/proxmox-post-install/`.
+  `/var/backups/proxmox-post-install/` with a restoration manifest.
+- Restore accepts only generated manifest paths below `/etc/apt/`, takes a
+  fresh safety backup, and validates the result with APT.
 - `apt-get update` validates repository changes immediately.
 - Failed validation triggers an automatic rollback.
 - Unknown PVE/Debian mappings are blocked from repository modification.
