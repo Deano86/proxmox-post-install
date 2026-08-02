@@ -382,7 +382,7 @@ install_nag_patch() {
 }
 
 remove_nag_patch() {
-    confirm "Restore dialog" "Remove the hook and reinstall the official toolkit file?" || return
+    confirm "Restore dialog" "Remove the hook and reinstall the official toolkit file?" || return 0
     rm -f -- "$NAG_HOOK" "$NAG_COMMAND"
     apt-get install --reinstall proxmox-widget-toolkit
     systemctl restart pveproxy.service
@@ -400,7 +400,9 @@ manage_ha() {
     case "$choice" in
         enable)
             systemctl enable --now pve-ha-lrm pve-ha-crm
-            [[ -f /etc/pve/corosync.conf ]] && systemctl enable --now corosync
+            if [[ -f /etc/pve/corosync.conf ]]; then
+                systemctl enable --now corosync
+            fi
             ;;
         disable)
             if [[ -f /etc/pve/corosync.conf ]]; then
@@ -416,11 +418,15 @@ manage_ha() {
 }
 
 update_system() {
-    confirm "System update" "Run apt-get update and interactive dist-upgrade?" || return
+    confirm "System update" "Run apt-get update and interactive dist-upgrade?" || return 0
     apt-get update
     apt-get dist-upgrade
 }
-reboot_host() { confirm "Reboot" "Reboot this host now?" && reboot; }
+reboot_host() {
+    if confirm "Reboot" "Reboot this host now?"; then
+        reboot
+    fi
+}
 
 interactive_main() {
     local choice
@@ -436,8 +442,9 @@ interactive_main() {
             pve-repos) configure_pve_repositories ;;
             ceph-repos) configure_ceph_repositories ;;
             nag-install)
-                confirm "Popup patch" "Install the targeted patch and APT hook?\n\nThis changes only the UI notification." &&
+                if confirm "Popup patch" "Install the targeted patch and APT hook?\n\nThis changes only the UI notification."; then
                     install_nag_patch
+                fi
                 ;;
             nag-remove) remove_nag_patch ;;
             ha) manage_ha ;;
@@ -455,6 +462,10 @@ EOF
 }
 
 main() {
+    if [[ ${1:-} == "--help" || ${1:-} == "-h" ]]; then
+        usage
+        return 0
+    fi
     require_root
     detect_platform
     case "${1:---interactive}" in
