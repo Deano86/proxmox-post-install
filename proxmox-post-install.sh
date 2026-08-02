@@ -69,6 +69,12 @@ message() { whiptail --backtitle "$APP_NAME" --title "$1" --msgbox "$2" 20 78; }
 
 begin_transaction() {
     TX_DIR="${BACKUP_ROOT}/$1-$(date -u +%Y%m%dT%H%M%SZ)"
+    if is_dry_run; then
+        TX_PATHS=()
+        TX_BACKUPS=()
+        TX_EXISTED=()
+        return 0
+    fi
     install -d -m 0750 "$TX_DIR"
     TX_PATHS=()
     TX_BACKUPS=()
@@ -693,6 +699,10 @@ NAG_SCRIPT
 
 install_nag_patch() {
     local backup_dir hook
+    if is_dry_run; then
+        preview "Would replace legacy popup hooks, install $NAG_COMMAND, install $NAG_HOOK, and apply the verified patch"
+        return 0
+    fi
     backup_dir="$BACKUP_ROOT/legacy-nag-$(date -u +%Y%m%dT%H%M%SZ)"
     install -d -m 0750 "$backup_dir"
     [[ -f $NAG_COMMAND ]] && cp -a -- "$NAG_COMMAND" "$backup_dir/"
@@ -718,6 +728,10 @@ install_nag_patch() {
 
 remove_nag_patch() {
     confirm "Restore dialog" "Remove the hook and reinstall the official toolkit file?" || return 0
+    if is_dry_run; then
+        preview "Would remove $NAG_HOOK and $NAG_COMMAND, reinstall proxmox-widget-toolkit, and restart pveproxy"
+        return 0
+    fi
     rm -f -- "$NAG_HOOK" "$NAG_COMMAND"
     apt-get install --reinstall proxmox-widget-toolkit
     systemctl restart pveproxy.service
@@ -732,6 +746,10 @@ manage_ha() {
     local choice
     choice="$(menu "High availability" "Current state: $(systemctl is-active pve-ha-lrm 2>/dev/null || true)" \
         leave "No changes" enable "Enable HA" disable "Disable on a standalone node" || printf leave)"
+    if is_dry_run && [[ $choice != leave ]]; then
+        preview "Would $choice HA services after applying cluster safety checks"
+        return 0
+    fi
     case "$choice" in
         enable)
             systemctl enable --now pve-ha-lrm pve-ha-crm
@@ -754,29 +772,41 @@ manage_ha() {
 
 update_system() {
     confirm "System update" "Run apt-get update and interactive dist-upgrade?" || return 0
+    if is_dry_run; then
+        preview "Would run apt-get update and apt-get dist-upgrade interactively"
+        return 0
+    fi
     apt-get update
     apt-get dist-upgrade
 }
 reboot_host() {
     if confirm "Reboot" "Reboot this host now?"; then
+        if is_dry_run; then preview "Would reboot the host"; return 0; fi
         reboot
     fi
 }
 
 interactive_main() {
-    local choice
+    local choice mode_label=""
     require_command whiptail
+    is_dry_run && mode_label=" | DRY-RUN"
     while true; do
-        choice="$(menu "$AUTHOR Edition | PVE $PVE_VERSION ($CODENAME)" \
+        choice="$(menu "$AUTHOR Edition | PVE $PVE_VERSION ($CODENAME)$mode_label" \
             "Created by $AUTHOR | github.com/Deano86/proxmox-post-install\n\nChoose an operation." \
-            audit "Read-only audit" pve-repos "Configure PVE repositories" \
-            ceph-repos "Configure Ceph repositories" nag-install "Install/update popup patch" \
+            health "Run host health checks" audit "Read-only configuration audit" \
+            report "Create a mode-0600 diagnostic report" migrate "Migrate PVE 9 repositories to deb822" \
+            pve-repos "Configure PVE repositories" ceph-repos "Configure Ceph repositories" \
+            restore "Restore a repository backup" nag-install "Install/update popup patch" \
             nag-remove "Remove patch and restore toolkit" ha "Manage HA services" \
             update "Interactive system update" reboot "Reboot host" exit "Exit" || printf exit)"
         case "$choice" in
+            health) run_health_check; read -r -p "Press Enter to return..." _ ;;
             audit) show_audit; read -r -p "Press Enter to return..." _ ;;
+            report) generate_diagnostic_report ;;
+            migrate) migrate_pve9_to_deb822 ;;
             pve-repos) configure_pve_repositories ;;
             ceph-repos) configure_ceph_repositories ;;
+            restore) restore_repository_backup ;;
             nag-install)
                 if confirm "Popup patch" "Install the targeted patch and APT hook?\n\nThis changes only the UI notification."; then
                     install_nag_patch
@@ -796,7 +826,15 @@ usage() {
 Deano86's Proxmox Post Install
 Project: https://github.com/Deano86/proxmox-post-install
 
-Usage: proxmox-post-install.sh [--interactive|--audit|--help]
+Usage: proxmox-post-install.sh [OPTION]
+
+Options:
+  --interactive  Open the interactive menu (default)
+  --dry-run      Open the menu and preview changes without writing
+  --audit        Print the configuration audit
+  --health       Run host health checks
+  --report       Create a permission-restricted diagnostic report
+  --help         Show this help
 EOF
 }
 
@@ -809,7 +847,10 @@ main() {
     detect_platform
     case "${1:---interactive}" in
         --interactive) interactive_main ;;
+        --dry-run) DRY_RUN=1; interactive_main ;;
         --audit) show_audit ;;
+        --health) run_health_check ;;
+        --report) generate_diagnostic_report ;;
         --help|-h) usage ;;
         *) usage >&2; exit 64 ;;
     esac
