@@ -746,6 +746,10 @@ manage_ha() {
     local choice
     choice="$(menu "High availability" "Current state: $(systemctl is-active pve-ha-lrm 2>/dev/null || true)" \
         leave "No changes" enable "Enable HA" disable "Disable on a standalone node" || printf leave)"
+    if [[ $choice == disable && -f /etc/pve/corosync.conf ]]; then
+        message "Cluster protection" "Corosync configuration exists; HA disablement was blocked."
+        return 0
+    fi
     if is_dry_run && [[ $choice != leave ]]; then
         preview "Would $choice HA services after applying cluster safety checks"
         return 0
