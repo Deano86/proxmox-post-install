@@ -105,7 +105,7 @@ source_files() {
 }
 
 show_audit() {
-    local toolkit nag_status="UNKNOWN"
+    local toolkit nag_status="UNKNOWN" hook_status cluster_status
     toolkit="$(dpkg-query -W -f='${Version}' proxmox-widget-toolkit 2>/dev/null || printf 'not installed')"
     if [[ -f $NAG_TARGET ]]; then
         if grep -Pzq "void\\(\\{\\s*title:\\s*gettext\\('No valid subscription'\\)," "$NAG_TARGET"; then
@@ -121,10 +121,11 @@ show_audit() {
         printf '\n[%s]\n' "$file"
         grep -E '^(deb |Types:|URIs:|Suites:|Components:|Enabled:|#.*deb )' "$file" || true
     done < <(source_files)
-    printf '\n=== Popup patch ===\nStatus: %s\nHook: %s\n' "$nag_status" \
-        "$([[ -f $NAG_HOOK ]] && printf INSTALLED || printf 'NOT INSTALLED')"
+    if [[ -f $NAG_HOOK ]]; then hook_status="INSTALLED"; else hook_status="NOT INSTALLED"; fi
+    if [[ -f /etc/pve/corosync.conf ]]; then cluster_status="PRESENT"; else cluster_status="ABSENT"; fi
+    printf '\n=== Popup patch ===\nStatus: %s\nHook: %s\n' "$nag_status" "$hook_status"
     printf '\n=== Cluster and HA ===\nCluster config: %s\npve-ha-lrm: %s\npve-ha-crm: %s\ncorosync: %s\n' \
-        "$([[ -f /etc/pve/corosync.conf ]] && printf PRESENT || printf ABSENT)" \
+        "$cluster_status" \
         "$(systemctl is-active pve-ha-lrm 2>/dev/null || true)" \
         "$(systemctl is-active pve-ha-crm 2>/dev/null || true)" \
         "$(systemctl is-active corosync 2>/dev/null || true)"
@@ -298,9 +299,11 @@ configure_ceph_repositories() {
     fi
     release="$(choose_ceph_release || printf none)"
     if [[ $release != none ]]; then
-        ceph_no_subscription_exists "$release" &&
-            say "Ceph $release no-subscription is already active." ||
+        if ceph_no_subscription_exists "$release"; then
+            say "Ceph $release no-subscription is already active."
+        else
             write_ceph_no_subscription "$release"
+        fi
     fi
     [[ ${#TX_PATHS[@]} -gt 0 ]] || { say "No changes requested."; return; }
     validate_apt_or_rollback || message "Rollback" "APT validation failed; changes were rolled back."
@@ -338,7 +341,11 @@ show_status() {
     if is_patched; then say "Status: PATCHED"
     elif is_unpatched; then say "Status: NOT PATCHED"
     else say "Status: UNKNOWN"; return 2; fi
-    say "APT hook: $([[ -f /etc/apt/apt.conf.d/99-proxmox-no-subscription-nag ]] && printf INSTALLED || printf 'NOT INSTALLED')"
+    if [[ -f /etc/apt/apt.conf.d/99-proxmox-no-subscription-nag ]]; then
+        say "APT hook: INSTALLED"
+    else
+        say "APT hook: NOT INSTALLED"
+    fi
 }
 case "${1:-patch}" in
     patch) patch_target ;;
