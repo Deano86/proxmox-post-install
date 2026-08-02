@@ -16,10 +16,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check Bash syntax
-        run: bash -n proxmox-post-install.sh proxmox-no-subscription-nag.sh
+        run: bash -n proxmox-post-install.sh proxmox-no-subscription-nag.sh proxmox-auto-update.sh
 
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
 
       - name: Run ShellCheck
-        run: shellcheck proxmox-post-install.sh proxmox-no-subscription-nag.sh
+        run: shellcheck proxmox-post-install.sh proxmox-no-subscription-nag.sh proxmox-auto-update.sh
