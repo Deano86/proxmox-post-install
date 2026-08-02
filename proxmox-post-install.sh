@@ -8,9 +8,10 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
-readonly VERSION="0.2.0"
+readonly VERSION="0.3.0"
 readonly AUTHOR="Deano86"
 readonly PROJECT_URL="https://github.com/Deano86/proxmox-post-install"
+readonly SELF_UPDATE_URL="https://raw.githubusercontent.com/Deano86/proxmox-post-install/main/proxmox-post-install.sh"
 readonly APP_NAME="${AUTHOR}'s Proxmox Post Install"
 readonly BACKUP_ROOT="/var/backups/proxmox-post-install"
 readonly NAG_TARGET="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
@@ -648,6 +649,64 @@ generate_diagnostic_report() {
     chmod 0600 "$report"
     say "Diagnostic report created: $report"
     warn "Review the report before sharing it; network addresses are included."
+}
+
+
+self_update_script() {
+    local current_path temporary remote_version backup latest
+    current_path="$(readlink -f -- "$0")"
+    [[ -f $current_path ]] || { warn "Save the script to a file before using self-update."; return 0; }
+
+    if is_dry_run; then
+        preview "Would download $SELF_UPDATE_URL, validate Bash syntax and version, back up $current_path, and replace it"
+        return 0
+    fi
+
+    require_command curl
+    temporary="$(mktemp)"
+    if ! curl -fsSL -H 'Cache-Control: no-cache' \
+        "$SELF_UPDATE_URL?v=$(date +%s)" -o "$temporary"; then
+        rm -f -- "$temporary"
+        message "Self-update failed" "The latest script could not be downloaded."
+        return 0
+    fi
+    if ! bash -n "$temporary"; then
+        rm -f -- "$temporary"
+        message "Self-update blocked" "The downloaded script failed Bash syntax validation."
+        return 0
+    fi
+
+    remote_version="$(sed -nE 's/^readonly VERSION="([^"]+)"/\1/p' "$temporary" | head -n1)"
+    if [[ -z $remote_version ]]; then
+        rm -f -- "$temporary"
+        message "Self-update blocked" "The downloaded script has no recognizable VERSION field."
+        return 0
+    fi
+    if [[ $remote_version == "$VERSION" ]]; then
+        rm -f -- "$temporary"
+        message "Already current" "Version $VERSION is already installed."
+        return 0
+    fi
+
+    latest="$(printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | tail -n1)"
+    if [[ $latest != "$remote_version" ]]; then
+        warn "Remote version $remote_version is older than installed version $VERSION."
+    fi
+    confirm "Update script" \
+        "Replace version $VERSION with version $remote_version?\n\nThe current script will be backed up first." || {
+        rm -f -- "$temporary"
+        return 0
+    }
+
+    backup="$BACKUP_ROOT/self-update-$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$current_path")"
+    install -d -m 0750 "$BACKUP_ROOT"
+    cp -a -- "$current_path" "$backup"
+    install -m 0755 -- "$temporary" "$current_path"
+    rm -f -- "$temporary"
+    say "Updated $current_path from v$VERSION to v$remote_version"
+    say "Previous version retained at: $backup"
+    message "Update complete" \
+        "Updated to version $remote_version.\n\nExit and run the script again to use the new version."
 }
 
 write_nag_command() {
