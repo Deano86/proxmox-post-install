@@ -11,6 +11,9 @@ and is distributed under the MIT License with attribution preserved.
 
 - Read-only configuration audit and host health checks.
 - Dry-run menu that previews changes without writing.
+- Validated self-update with version display and a timestamped backup.
+- Guarded automated update checks using a persistent systemd timer.
+- Optional scheduled package installation using `apt-get dist-upgrade`.
 - PVE 9 legacy-to-deb822 repository migration with APT validation.
 - Restorable repository backups with path-validated manifests.
 - Mode-0600 diagnostic report export with a sharing warning.
@@ -22,7 +25,7 @@ and is distributed under the MIT License with attribution preserved.
 - Targeted, self-verifying subscription-popup patch with an APT upgrade hook.
 - Timestamped popup and repository backups.
 - Cluster protection before disabling HA or Corosync.
-- Updates and reboot only after explicit confirmation.
+- Interactive updates and reboot only after explicit confirmation.
 
 > [!IMPORTANT]
 > The no-subscription repository receives less validation than the enterprise
@@ -61,11 +64,57 @@ sudo ./proxmox-post-install.sh --health
 
 # Create /root/proxmox-diagnostic-*.txt with mode 0600
 sudo ./proxmox-post-install.sh --report
+
+# Validate, back up, and replace this script from GitHub
+sudo ./proxmox-post-install.sh --self-update
+
+# Show the automated-update timer and its recent log
+sudo ./proxmox-post-install.sh --update-status
 ```
 
 The diagnostic report intentionally excludes guest configuration files,
 subscription keys, and journal logs. It includes interface IP addresses, so
 review it before sharing.
+
+## Automated host updates
+
+Open **Automated host updates** from the interactive menu. Available presets
+are:
+
+| Preset | Schedule | Behaviour |
+|---|---|---|
+| Daily check | Every day at 06:00 | Refreshes APT metadata and simulates `dist-upgrade` |
+| Weekly check | Sunday at 04:00 | Refreshes APT metadata and simulates `dist-upgrade` |
+| Weekly install | Sunday at 04:00 | Installs with guarded, noninteractive `dist-upgrade` |
+
+Check-only mode is recommended. Install mode is deliberately opt-in because
+unattended hypervisor changes carry operational risk. The worker:
+
+- prevents overlapping runs with `flock`;
+- requires at least 4 GiB free on the root filesystem;
+- blocks on incomplete dpkg operations or failed APT validation;
+- blocks clustered installs when quorum is unavailable;
+- preserves locally modified package configuration files;
+- logs to `/var/log/proxmox-auto-update.log`; and
+- never reboots the host automatically.
+
+The installed timer is persistent and uses a 30-minute randomized delay.
+Configuration is stored in `/etc/default/proxmox-auto-update`. Use the menu to
+run the configured worker immediately, inspect status, change the preset, or
+remove it. Existing scheduler files are backed up below
+`/var/backups/proxmox-post-install/`.
+
+The standalone worker source is also published as
+[`proxmox-auto-update.sh`](proxmox-auto-update.sh) for review. Normally, let
+the main interactive script install it together with its systemd unit, timer,
+configuration, and log rotation policy.
+
+## Self-update safety
+
+Self-update downloads a fresh copy from this repository, runs `bash -n`,
+checks its declared version, asks for confirmation, and backs up the running
+script before replacement. It does not automatically execute the new version;
+rerun the command after updating.
 
 ## Safety model
 
@@ -81,6 +130,7 @@ review it before sharing.
 - The popup patch refuses to run if its exact expected code is absent.
 - Package upgrades call a dedicated idempotent patch command rather than an
   inline `sed` expression embedded in APT configuration.
+- Scheduled installation uses `dist-upgrade`, never plain `apt upgrade`.
 
 ## Supported mappings
 
