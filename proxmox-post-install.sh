@@ -429,6 +429,391 @@ configure_ceph_repositories() {
 }
 
 
+
+restore_repository_backup() {
+    local options=() directory choice selected summary=""
+    local index path existed count
+    local -a restore_indexes=() restore_paths=() restore_existed=()
+
+    for directory in "$BACKUP_ROOT"/*; do
+        [[ -s $directory/manifest.tsv ]] || continue
+        count="$(wc -l <"$directory/manifest.tsv")"
+        options+=("$(basename "$directory")" "$count tracked path(s)")
+    done
+
+    if [[ ${#options[@]} -eq 0 ]]; then
+        message "No restorable backups" \
+            "No repository backup manifests were found. Backups created before v0.2 require manual restoration."
+        return 0
+    fi
+
+    choice="$(menu "Restore repository backup" \
+        "Select a generated repository backup. A new safety backup is made before restoration." \
+        "${options[@]}" || true)"
+    [[ -n $choice ]] || return 0
+    selected="$BACKUP_ROOT/$choice"
+    [[ -s $selected/manifest.tsv ]] || { warn "Selected backup has no manifest."; return 0; }
+
+    while IFS=
+    local level="$1"
+    shift
+    printf '[%-4s] %s\n' "$level" "$*"
+}
+
+run_health_check() {
+    local root_free_kb failed_units held_packages fqdn apt_output
+    printf '\n=== Host health check ===\n'
+
+    root_free_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
+    if [[ ${root_free_kb:-0} -ge 4194304 ]]; then
+        health_result PASS "Root filesystem has at least 4 GiB free ($(df -hP / | awk 'NR == 2 {print $4}'))."
+    else
+        health_result WARN "Root filesystem has less than 4 GiB free ($(df -hP / | awk 'NR == 2 {print $4}'))."
+    fi
+
+    failed_units="$(systemctl --failed --no-legend 2>/dev/null | grep -c . || true)"
+    if [[ $failed_units -eq 0 ]]; then
+        health_result PASS "No failed systemd units."
+    else
+        health_result WARN "$failed_units systemd unit(s) are failed."
+        systemctl --failed --no-pager || true
+    fi
+
+    if [[ -z $(dpkg --audit 2>&1) ]]; then
+        health_result PASS "dpkg reports no incomplete package operations."
+    else
+        health_result WARN "dpkg reports incomplete or inconsistent packages."
+        dpkg --audit || true
+    fi
+
+    if apt_output="$(apt-get check 2>&1)"; then
+        health_result PASS "APT dependency check passed."
+    else
+        health_result FAIL "APT dependency check failed."
+        printf '%s\n' "$apt_output"
+    fi
+
+    if pvesm status >/dev/null 2>&1; then
+        health_result PASS "Configured PVE storage is queryable."
+    else
+        health_result FAIL "pvesm could not query configured storage."
+    fi
+
+    if command -v zpool >/dev/null 2>&1; then
+        if zpool status -x 2>/dev/null | grep -q 'all pools are healthy'; then
+            health_result PASS "All ZFS pools report healthy."
+        else
+            health_result WARN "One or more ZFS pools require inspection."
+            zpool status -x || true
+        fi
+    else
+        health_result PASS "ZFS is not installed; ZFS health check skipped."
+    fi
+
+    if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qx yes; then
+        health_result PASS "System clock reports NTP synchronization."
+    else
+        health_result WARN "System clock does not report NTP synchronization."
+    fi
+
+    fqdn="$(hostname -f 2>/dev/null || true)"
+    if [[ -n $fqdn ]] && getent ahostsv4 "$fqdn" >/dev/null 2>&1; then
+        health_result PASS "Hostname resolves: $fqdn"
+    else
+        health_result WARN "The host FQDN is missing or does not resolve."
+    fi
+
+    if [[ -f /etc/pve/corosync.conf ]]; then
+        if pvecm status 2>/dev/null | grep -Eq 'Quorate:[[:space:]]+Yes'; then
+            health_result PASS "Cluster is quorate."
+        else
+            health_result FAIL "Cluster configuration exists but quorum is unavailable."
+        fi
+    else
+        health_result PASS "Standalone node; cluster quorum check skipped."
+    fi
+
+    held_packages="$(apt-mark showhold 2>/dev/null || true)"
+    if [[ -z $held_packages ]]; then
+        health_result PASS "No APT packages are held."
+    else
+        health_result WARN "Held APT packages: $(tr '\n' ' ' <<<"$held_packages")"
+    fi
+
+    if [[ -e /var/run/reboot-required ]]; then
+        health_result WARN "A reboot is required."
+    else
+        health_result PASS "No reboot-required marker is present."
+    fi
+
+    if [[ -x $NAG_COMMAND ]]; then
+        "$NAG_COMMAND" status || true
+    else
+        health_result WARN "No standalone popup-patch command is installed."
+    fi
+    printf '\n'
+    return 0
+}
+
+generate_diagnostic_report() {
+    local report
+    report="/root/proxmox-diagnostic-$(date -u +%Y%m%dT%H%M%SZ).txt"
+    if is_dry_run; then
+        preview "Would create a mode-0600 diagnostic report at $report"
+        return 0
+    fi
+
+    umask 077
+    {
+        printf '%s v%s\nGenerated: %s\n\n' "$APP_NAME" "$VERSION" "$(date -u --iso-8601=seconds)"
+        show_audit
+        run_health_check
+        printf '\n=== Kernel and uptime ===\n'
+        uname -a
+        uptime
+        printf '\n=== Memory ===\n'
+        free -h
+        printf '\n=== Block devices ===\n'
+        lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
+        printf '\n=== PVE storage ===\n'
+        pvesm status || true
+        if command -v zpool >/dev/null 2>&1; then
+            printf '\n=== ZFS status ===\n'
+            zpool status -x || true
+        fi
+        printf '\n=== IPv4 interface summary ===\n'
+        ip -brief -4 address 2>/dev/null || true
+        printf '\n=== Failed services ===\n'
+        systemctl --failed --no-pager || true
+        printf '\n=== Held packages ===\n'
+        apt-mark showhold 2>/dev/null || true
+    } >"$report"
+    chmod 0600 "$report"
+    say "Diagnostic report created: $report"
+    warn "Review the report before sharing it; network addresses are included."
+}
+
+write_nag_command() {
+    cat >"$NAG_COMMAND" <<'NAG_SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+readonly TARGET="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+readonly BACKUP_DIR="/var/backups/proxmox-no-subscription-nag"
+say() { printf '[proxmox-no-subscription-nag] %s\n' "$*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+is_patched() { grep -Pzq "void\\(\\{\\s*title:\\s*gettext\\('No valid subscription'\\)," "$TARGET"; }
+is_unpatched() { grep -Pzq "Ext\\.Msg\\.show\\(\\{\\s*title:\\s*gettext\\('No valid subscription'\\)," "$TARGET"; }
+patch_target() {
+    [[ -f $TARGET ]] || die "Target not found: $TARGET"
+    if is_patched; then say "Already patched: $TARGET"; return 0; fi
+    is_unpatched || die "Expected popup code absent; refusing a broad replacement."
+    local version stamp safe_version backup
+    version="$(dpkg-query -W -f='${Version}' proxmox-widget-toolkit 2>/dev/null || printf unknown)"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    safe_version="${version//[^a-zA-Z0-9._+~-]/_}"
+    backup="${BACKUP_DIR}/proxmoxlib.js.${safe_version}.${stamp}"
+    install -d -m 0750 "$BACKUP_DIR"
+    cp -a -- "$TARGET" "$backup"
+    say "Created backup: $backup"
+    sed -Ezi "s/Ext\\.Msg\\.show\\(\\{([[:space:]]*title:[[:space:]]*gettext\\('No valid subscription'\\),)/void({\\1/" "$TARGET"
+    if ! is_patched; then cp -a -- "$backup" "$TARGET"; die "Verification failed; backup restored."; fi
+    systemctl is-active --quiet pveproxy.service && systemctl restart pveproxy.service
+    say "SUCCESS: patch applied and verified."
+}
+show_status() {
+    [[ -f $TARGET ]] || die "Target not found: $TARGET"
+    if is_patched; then say "Status: PATCHED"
+    elif is_unpatched; then say "Status: NOT PATCHED"
+    else say "Status: UNKNOWN"; return 2; fi
+    if [[ -f /etc/apt/apt.conf.d/99-proxmox-no-subscription-nag ]]; then
+        say "APT hook: INSTALLED"
+    else
+        say "APT hook: NOT INSTALLED"
+    fi
+}
+case "${1:-patch}" in
+    patch) patch_target ;;
+    status) show_status ;;
+    *) printf 'Usage: %s {patch|status}\n' "$0" >&2; exit 64 ;;
+esac
+NAG_SCRIPT
+    chmod 0755 "$NAG_COMMAND"
+}
+
+install_nag_patch() {
+    local backup_dir hook
+    backup_dir="$BACKUP_ROOT/legacy-nag-$(date -u +%Y%m%dT%H%M%SZ)"
+    install -d -m 0750 "$backup_dir"
+    [[ -f $NAG_COMMAND ]] && cp -a -- "$NAG_COMMAND" "$backup_dir/"
+    for hook in /etc/apt/apt.conf.d/no-nag-script /etc/apt/apt.conf.d/99-pve-nag-fix "$NAG_HOOK"; do
+        if [[ -f $hook ]]; then
+            cp -a -- "$hook" "$backup_dir/"
+            rm -f -- "$hook"
+            say "Disabled previous hook: $hook"
+        fi
+    done
+    while IFS= read -r hook; do
+        cp -a -- "$hook" "$backup_dir/"
+        rm -f -- "$hook"
+        say "Disabled additional legacy hook: $hook"
+    done < <(grep -RlE 'proxmoxlib\.js|fix-proxmox-subscription|pve-remove-nag' /etc/apt/apt.conf.d 2>/dev/null || true)
+    write_nag_command
+    printf 'DPkg::Post-Invoke { "/usr/local/sbin/proxmox-no-subscription-nag patch || echo '\''WARNING: Proxmox popup patch failed.'\'' >&2"; };\n' >"$NAG_HOOK"
+    chmod 0644 "$NAG_HOOK"
+    "$NAG_COMMAND" patch
+    "$NAG_COMMAND" status
+    say "Legacy hook backups: $backup_dir"
+}
+
+remove_nag_patch() {
+    confirm "Restore dialog" "Remove the hook and reinstall the official toolkit file?" || return 0
+    rm -f -- "$NAG_HOOK" "$NAG_COMMAND"
+    apt-get install --reinstall proxmox-widget-toolkit
+    systemctl restart pveproxy.service
+    if dpkg -V proxmox-widget-toolkit 2>/dev/null | grep -q '/proxmoxlib\.js$'; then
+        warn "proxmoxlib.js still differs from the package."
+    else
+        say "Official proxmoxlib.js restored."
+    fi
+}
+
+manage_ha() {
+    local choice
+    choice="$(menu "High availability" "Current state: $(systemctl is-active pve-ha-lrm 2>/dev/null || true)" \
+        leave "No changes" enable "Enable HA" disable "Disable on a standalone node" || printf leave)"
+    case "$choice" in
+        enable)
+            systemctl enable --now pve-ha-lrm pve-ha-crm
+            if [[ -f /etc/pve/corosync.conf ]]; then
+                systemctl enable --now corosync
+            fi
+            ;;
+        disable)
+            if [[ -f /etc/pve/corosync.conf ]]; then
+                message "Cluster protection" "Corosync configuration exists; HA disablement was blocked."
+                return
+            fi
+            if confirm "Standalone node" "Disable HA and Corosync services?"; then
+                systemctl disable --now pve-ha-lrm pve-ha-crm 2>/dev/null || true
+                systemctl disable --now corosync 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
+update_system() {
+    confirm "System update" "Run apt-get update and interactive dist-upgrade?" || return 0
+    apt-get update
+    apt-get dist-upgrade
+}
+reboot_host() {
+    if confirm "Reboot" "Reboot this host now?"; then
+        reboot
+    fi
+}
+
+interactive_main() {
+    local choice
+    require_command whiptail
+    while true; do
+        choice="$(menu "$AUTHOR Edition | PVE $PVE_VERSION ($CODENAME)" \
+            "Created by $AUTHOR | github.com/Deano86/proxmox-post-install\n\nChoose an operation." \
+            audit "Read-only audit" pve-repos "Configure PVE repositories" \
+            ceph-repos "Configure Ceph repositories" nag-install "Install/update popup patch" \
+            nag-remove "Remove patch and restore toolkit" ha "Manage HA services" \
+            update "Interactive system update" reboot "Reboot host" exit "Exit" || printf exit)"
+        case "$choice" in
+            audit) show_audit; read -r -p "Press Enter to return..." _ ;;
+            pve-repos) configure_pve_repositories ;;
+            ceph-repos) configure_ceph_repositories ;;
+            nag-install)
+                if confirm "Popup patch" "Install the targeted patch and APT hook?\n\nThis changes only the UI notification."; then
+                    install_nag_patch
+                fi
+                ;;
+            nag-remove) remove_nag_patch ;;
+            ha) manage_ha ;;
+            update) update_system ;;
+            reboot) reboot_host ;;
+            exit) break ;;
+        esac
+    done
+}
+
+usage() {
+    cat <<'EOF'
+Deano86's Proxmox Post Install
+Project: https://github.com/Deano86/proxmox-post-install
+
+Usage: proxmox-post-install.sh [--interactive|--audit|--help]
+EOF
+}
+
+main() {
+    if [[ ${1:-} == "--help" || ${1:-} == "-h" ]]; then
+        usage
+        return 0
+    fi
+    require_root
+    detect_platform
+    case "${1:---interactive}" in
+        --interactive) interactive_main ;;
+        --audit) show_audit ;;
+        --help|-h) usage ;;
+        *) usage >&2; exit 64 ;;
+    esac
+}
+main "$@"
+\t' read -r index path existed; do
+        [[ $index =~ ^[0-9]+$ && $existed =~ ^[01]$ ]] || {
+            warn "Invalid backup manifest entry; restoration blocked."
+            return 0
+        }
+        case "$path" in
+            /etc/apt/*) ;;
+            *) warn "Manifest path outside /etc/apt was blocked: $path"; return 0 ;;
+        esac
+        if [[ $existed -eq 1 && ! -e $selected/item-$index ]]; then
+            warn "Backup payload is missing for $path; restoration blocked."
+            return 0
+        fi
+        restore_indexes+=("$index")
+        restore_paths+=("$path")
+        restore_existed+=("$existed")
+        summary+="$path — $([[ $existed -eq 1 ]] && printf restore || printf remove-created-file)\n"
+    done <"$selected/manifest.tsv"
+
+    message "Restore preview" "Backup: $choice\n\n$summary"
+    confirm "Confirm restoration" \
+        "Restore this repository backup and validate it with apt-get update?" || return 0
+
+    if is_dry_run; then
+        preview "Would restore repository state from $selected"
+        preview "Would create a pre-restore safety backup and run apt-get update"
+        return 0
+    fi
+
+    begin_transaction "pre-restore"
+    for path in "${restore_paths[@]}"; do backup_path "$path"; done
+
+    for index in "${!restore_paths[@]}"; do
+        path="${restore_paths[$index]}"
+        if [[ ${restore_existed[$index]} -eq 1 ]]; then
+            install -d -m 0755 "$(dirname "$path")"
+            rm -f -- "$path"
+            cp -a -- "$selected/item-${restore_indexes[$index]}" "$path"
+        else
+            rm -f -- "$path"
+        fi
+    done
+
+    if validate_apt_or_rollback; then
+        say "Repository backup restored successfully from $selected"
+    else
+        message "Restore rollback" "APT validation failed; the state from before restoration was reinstated."
+    fi
+}
+
 health_result() {
     local level="$1"
     shift
