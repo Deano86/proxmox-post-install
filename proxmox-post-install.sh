@@ -8,6 +8,7 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
+readonly VERSION="0.2.0"
 readonly AUTHOR="Deano86"
 readonly PROJECT_URL="https://github.com/Deano86/proxmox-post-install"
 readonly APP_NAME="${AUTHOR}'s Proxmox Post Install"
@@ -21,6 +22,7 @@ PVE_VERSION=""
 CODENAME=""
 ARCH=""
 TX_DIR=""
+DRY_RUN=0
 declare -a TX_PATHS=()
 declare -a TX_BACKUPS=()
 declare -a TX_EXISTED=()
@@ -28,6 +30,8 @@ declare -a TX_EXISTED=()
 say() { printf '[proxmox-post-install] %s\n' "$*"; }
 warn() { printf '[proxmox-post-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[proxmox-post-install] ERROR: %s\n' "$*" >&2; exit 1; }
+is_dry_run() { [[ $DRY_RUN -eq 1 ]]; }
+preview() { printf '[proxmox-post-install] DRY-RUN: %s\n' "$*"; }
 on_error() { warn "Command failed at line $1 with exit code $2."; }
 trap 'on_error "$LINENO" "$?"' ERR
 
@@ -58,7 +62,7 @@ menu() {
     local title="$1" prompt="$2"
     shift 2
     whiptail --backtitle "$APP_NAME" --title "$title" \
-        --menu "$prompt" 22 78 12 "$@" 3>&1 1>&2 2>&3
+        --menu "$prompt" 26 84 16 "$@" 3>&1 1>&2 2>&3
 }
 confirm() { whiptail --backtitle "$APP_NAME" --title "$1" --yesno "$2" 14 78; }
 message() { whiptail --backtitle "$APP_NAME" --title "$1" --msgbox "$2" 20 78; }
@@ -69,6 +73,7 @@ begin_transaction() {
     TX_PATHS=()
     TX_BACKUPS=()
     TX_EXISTED=()
+    : >"$TX_DIR/manifest.tsv"
 }
 
 backup_path() {
@@ -85,6 +90,7 @@ backup_path() {
     else
         TX_EXISTED+=(0)
     fi
+    printf '%s\t%s\t%s\n' "$index" "$path" "${TX_EXISTED[$index]}" >>"$TX_DIR/manifest.tsv"
 }
 
 rollback_transaction() {
@@ -116,7 +122,7 @@ show_audit() {
             nag_status="NOT PATCHED"
         fi
     fi
-    printf '\n=== %s ===\nProject: %s\n\n' "$APP_NAME" "$PROJECT_URL"
+    printf '\n=== %s v%s ===\nProject: %s\n\n' "$APP_NAME" "$VERSION" "$PROJECT_URL"
     printf '=== Platform ===\nPVE: %s\nDebian: %s\nArchitecture: %s\nToolkit: %s\n' \
         "$PVE_VERSION" "$CODENAME" "$ARCH" "$toolkit"
     printf '\n=== APT sources ===\n'
@@ -155,6 +161,10 @@ disable_pve_enterprise() {
     local file
     while IFS= read -r file; do
         grep -q 'pve-enterprise' "$file" || continue
+        if is_dry_run; then
+            preview "Would disable PVE enterprise entry in $file"
+            continue
+        fi
         backup_path "$file"
         case "$file" in
             *.sources) disable_deb822_stanzas "$file" 'Components:[^\n]*pve-enterprise' ;;
@@ -168,6 +178,10 @@ disable_ceph_enterprise() {
     local file
     while IFS= read -r file; do
         grep -qE 'enterprise\.proxmox\.com/debian/ceph-' "$file" || continue
+        if is_dry_run; then
+            preview "Would disable Ceph enterprise entry in $file"
+            continue
+        fi
         backup_path "$file"
         case "$file" in
             *.sources) disable_deb822_stanzas "$file" 'enterprise\.proxmox\.com/debian/ceph-' ;;
@@ -199,6 +213,7 @@ write_pve_no_subscription() {
     local target
     if [[ $PVE_MAJOR == 9 ]]; then
         target="/etc/apt/sources.list.d/pve-no-subscription.sources"
+        if is_dry_run; then preview "Would create $target"; return 0; fi
         backup_path "$target"
         cat >"$target" <<EOF
 Types: deb
@@ -209,6 +224,7 @@ Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
     else
         target="/etc/apt/sources.list.d/pve-no-subscription.list"
+        if is_dry_run; then preview "Would create $target"; return 0; fi
         backup_path "$target"
         printf 'deb http://download.proxmox.com/debian/pve %s pve-no-subscription\n' "$CODENAME" >"$target"
     fi
@@ -217,6 +233,10 @@ EOF
 }
 
 validate_apt_or_rollback() {
+    if is_dry_run; then
+        preview "Would run apt-get update and roll back automatically on failure"
+        return 0
+    fi
     say "Validating with apt-get update..."
     if apt-get update; then
         say "Backup retained at $TX_DIR"
@@ -239,6 +259,7 @@ configure_pve_repositories() {
         "Add PVE no-subscription for $CODENAME?\n\nEnterprise is recommended for production."; then
         write_pve_no_subscription
     fi
+    if is_dry_run; then preview "PVE repository preview complete"; return 0; fi
     [[ ${#TX_PATHS[@]} -gt 0 ]] || { say "No changes requested."; return; }
     validate_apt_or_rollback || message "Rollback" "APT validation failed; changes were rolled back."
 }
@@ -276,6 +297,7 @@ write_ceph_no_subscription() {
     local release="$1" target
     if [[ $PVE_MAJOR == 9 ]]; then
         target="/etc/apt/sources.list.d/ceph-$release-no-subscription.sources"
+        if is_dry_run; then preview "Would create $target"; return 0; fi
         backup_path "$target"
         cat >"$target" <<EOF
 Types: deb
@@ -286,6 +308,7 @@ Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
     else
         target="/etc/apt/sources.list.d/ceph-$release-no-subscription.list"
+        if is_dry_run; then preview "Would create $target"; return 0; fi
         backup_path "$target"
         printf 'deb http://download.proxmox.com/debian/ceph-%s %s no-subscription\n' "$release" "$CODENAME" >"$target"
     fi
@@ -308,6 +331,7 @@ configure_ceph_repositories() {
             write_ceph_no_subscription "$release"
         fi
     fi
+    if is_dry_run; then preview "Ceph repository preview complete"; return 0; fi
     [[ ${#TX_PATHS[@]} -gt 0 ]] || { say "No changes requested."; return; }
     validate_apt_or_rollback || message "Rollback" "APT validation failed; changes were rolled back."
 }
