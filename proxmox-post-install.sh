@@ -10,7 +10,7 @@ shopt -s nullglob
 
 readonly AUTHOR="Deano86"
 readonly PROJECT_URL="https://github.com/Deano86/proxmox-post-install"
-readonly APP_NAME="Deano86's Proxmox Post Install"
+readonly APP_NAME="${AUTHOR}'s Proxmox Post Install"
 readonly BACKUP_ROOT="/var/backups/proxmox-post-install"
 readonly NAG_TARGET="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 readonly NAG_COMMAND="/usr/local/sbin/proxmox-no-subscription-nag"
