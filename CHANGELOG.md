@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 — 2026-08-02
+
+- Fixed startup on Debian and Proxmox by renaming the script's readonly `VERSION` variable to `SCRIPT_VERSION`.
+- Prevented the collision with the `VERSION` field sourced from `/etc/os-release`.
+- Updated self-update version detection to recognize the renamed field.
+
+
 ## 0.3.0 — 2026-08-02
 
 - Added a validated, backup-first script self-update command.
