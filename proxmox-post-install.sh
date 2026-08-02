@@ -264,6 +264,98 @@ configure_pve_repositories() {
     validate_apt_or_rollback || message "Rollback" "APT validation failed; changes were rolled back."
 }
 
+
+legacy_pve9_sources_exist() {
+    local file
+    while IFS= read -r file; do
+        [[ $file == *.sources ]] && continue
+        if grep -Eq '^[[:space:]]*deb .*((deb|ftp)\.debian\.org/debian|security\.debian\.org/debian-security|download\.proxmox\.com/debian/pve)' "$file"; then
+            return 0
+        fi
+    done < <(source_files)
+    return 1
+}
+
+migrate_pve9_to_deb822() {
+    local debian_target="/etc/apt/sources.list.d/debian.sources"
+    local pve_target="/etc/apt/sources.list.d/pve-no-subscription.sources"
+    local file
+
+    if [[ $PVE_MAJOR != 9 || $CODENAME != trixie ]]; then
+        message "PVE 9 only" "deb822 migration is available only for PVE 9 on Debian Trixie."
+        return 0
+    fi
+    if ! legacy_pve9_sources_exist; then
+        message "Nothing to migrate" "No active legacy Debian or PVE repository lines were found."
+        return 0
+    fi
+    if [[ -e $debian_target || -e $pve_target ]]; then
+        message "Existing deb822 files" \
+            "A migration target already exists:\n\n$debian_target\n$pve_target\n\nUse Audit to resolve duplicates before migrating."
+        return 0
+    fi
+    if ! confirm "Migrate repositories" \
+        "Convert active Debian and PVE 9 repository lines to deb822 .sources files?\n\nOnly official Debian and PVE no-subscription entries are changed. APT validation and automatic rollback are included."; then
+        return 0
+    fi
+
+    if is_dry_run; then
+        while IFS= read -r file; do
+            [[ $file == *.sources ]] && continue
+            grep -Eq '^[[:space:]]*deb .*((deb|ftp)\.debian\.org/debian|security\.debian\.org/debian-security|download\.proxmox\.com/debian/pve)' "$file" &&
+                preview "Would comment migrated official repository lines in $file"
+        done < <(source_files)
+        preview "Would create $debian_target"
+        preview "Would create $pve_target"
+        preview "Would validate with apt-get update and roll back on failure"
+        return 0
+    fi
+
+    begin_transaction "deb822-migration"
+    backup_path "$debian_target"
+    backup_path "$pve_target"
+
+    cat >"$debian_target" <<EOF
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie trixie-updates
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: trixie-security
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+    cat >"$pve_target" <<EOF
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+    chmod 0644 "$debian_target" "$pve_target"
+
+    while IFS= read -r file; do
+        [[ $file == *.sources ]] && continue
+        if grep -Eq '^[[:space:]]*deb .*((deb|ftp)\.debian\.org/debian|security\.debian\.org/debian-security|download\.proxmox\.com/debian/pve)' "$file"; then
+            backup_path "$file"
+            sed -Ei \
+                -e '/^[[:space:]]*deb .*((deb|ftp)\.debian\.org\/debian|security\.debian\.org\/debian-security)/s/^/# migrated to deb822 by proxmox-post-install: /' \
+                -e '/^[[:space:]]*deb .*download\.proxmox\.com\/debian\/pve .*pve-no-subscription/s/^/# migrated to deb822 by proxmox-post-install: /' \
+                "$file"
+        fi
+    done < <(source_files)
+
+    if validate_apt_or_rollback; then
+        say "PVE 9 repositories migrated to deb822 successfully."
+    else
+        message "Migration rollback" "APT validation failed; the legacy repository configuration was restored."
+    fi
+}
+
 choose_ceph_release() {
     if [[ $PVE_MAJOR == 9 ]]; then
         menu "Ceph release" "Only add this when the node uses Ceph packages." \
