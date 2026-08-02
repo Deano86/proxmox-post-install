@@ -336,6 +336,146 @@ configure_ceph_repositories() {
     validate_apt_or_rollback || message "Rollback" "APT validation failed; changes were rolled back."
 }
 
+
+health_result() {
+    local level="$1"
+    shift
+    printf '[%-4s] %s\n' "$level" "$*"
+}
+
+run_health_check() {
+    local root_free_kb failed_units held_packages fqdn apt_output
+    printf '\n=== Host health check ===\n'
+
+    root_free_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
+    if [[ ${root_free_kb:-0} -ge 4194304 ]]; then
+        health_result PASS "Root filesystem has at least 4 GiB free ($(df -hP / | awk 'NR == 2 {print $4}'))."
+    else
+        health_result WARN "Root filesystem has less than 4 GiB free ($(df -hP / | awk 'NR == 2 {print $4}'))."
+    fi
+
+    failed_units="$(systemctl --failed --no-legend 2>/dev/null | grep -c . || true)"
+    if [[ $failed_units -eq 0 ]]; then
+        health_result PASS "No failed systemd units."
+    else
+        health_result WARN "$failed_units systemd unit(s) are failed."
+        systemctl --failed --no-pager || true
+    fi
+
+    if [[ -z $(dpkg --audit 2>&1) ]]; then
+        health_result PASS "dpkg reports no incomplete package operations."
+    else
+        health_result WARN "dpkg reports incomplete or inconsistent packages."
+        dpkg --audit || true
+    fi
+
+    if apt_output="$(apt-get check 2>&1)"; then
+        health_result PASS "APT dependency check passed."
+    else
+        health_result FAIL "APT dependency check failed."
+        printf '%s\n' "$apt_output"
+    fi
+
+    if pvesm status >/dev/null 2>&1; then
+        health_result PASS "Configured PVE storage is queryable."
+    else
+        health_result FAIL "pvesm could not query configured storage."
+    fi
+
+    if command -v zpool >/dev/null 2>&1; then
+        if zpool status -x 2>/dev/null | grep -q 'all pools are healthy'; then
+            health_result PASS "All ZFS pools report healthy."
+        else
+            health_result WARN "One or more ZFS pools require inspection."
+            zpool status -x || true
+        fi
+    else
+        health_result PASS "ZFS is not installed; ZFS health check skipped."
+    fi
+
+    if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qx yes; then
+        health_result PASS "System clock reports NTP synchronization."
+    else
+        health_result WARN "System clock does not report NTP synchronization."
+    fi
+
+    fqdn="$(hostname -f 2>/dev/null || true)"
+    if [[ -n $fqdn ]] && getent ahostsv4 "$fqdn" >/dev/null 2>&1; then
+        health_result PASS "Hostname resolves: $fqdn"
+    else
+        health_result WARN "The host FQDN is missing or does not resolve."
+    fi
+
+    if [[ -f /etc/pve/corosync.conf ]]; then
+        if pvecm status 2>/dev/null | grep -Eq 'Quorate:[[:space:]]+Yes'; then
+            health_result PASS "Cluster is quorate."
+        else
+            health_result FAIL "Cluster configuration exists but quorum is unavailable."
+        fi
+    else
+        health_result PASS "Standalone node; cluster quorum check skipped."
+    fi
+
+    held_packages="$(apt-mark showhold 2>/dev/null || true)"
+    if [[ -z $held_packages ]]; then
+        health_result PASS "No APT packages are held."
+    else
+        health_result WARN "Held APT packages: $(tr '\n' ' ' <<<"$held_packages")"
+    fi
+
+    if [[ -e /var/run/reboot-required ]]; then
+        health_result WARN "A reboot is required."
+    else
+        health_result PASS "No reboot-required marker is present."
+    fi
+
+    if [[ -x $NAG_COMMAND ]]; then
+        "$NAG_COMMAND" status || true
+    else
+        health_result WARN "No standalone popup-patch command is installed."
+    fi
+    printf '\n'
+    return 0
+}
+
+generate_diagnostic_report() {
+    local report
+    report="/root/proxmox-diagnostic-$(date -u +%Y%m%dT%H%M%SZ).txt"
+    if is_dry_run; then
+        preview "Would create a mode-0600 diagnostic report at $report"
+        return 0
+    fi
+
+    umask 077
+    {
+        printf '%s v%s\nGenerated: %s\n\n' "$APP_NAME" "$VERSION" "$(date -u --iso-8601=seconds)"
+        show_audit
+        run_health_check
+        printf '\n=== Kernel and uptime ===\n'
+        uname -a
+        uptime
+        printf '\n=== Memory ===\n'
+        free -h
+        printf '\n=== Block devices ===\n'
+        lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
+        printf '\n=== PVE storage ===\n'
+        pvesm status || true
+        if command -v zpool >/dev/null 2>&1; then
+            printf '\n=== ZFS status ===\n'
+            zpool status -x || true
+        fi
+        printf '\n=== IPv4 interface summary ===\n'
+        ip -brief -4 address 2>/dev/null || true
+        printf '\n=== Failed services ===\n'
+        systemctl --failed --no-pager || true
+        printf '\n=== Held packages ===\n'
+        apt-mark showhold 2>/dev/null || true
+    } >"$report"
+    chmod 0600 "$report"
+    say "Diagnostic report created: $report"
+    warn "Review the report before sharing it; network addresses are included."
+}
+
 write_nag_command() {
     cat >"$NAG_COMMAND" <<'NAG_SCRIPT'
 #!/usr/bin/env bash
