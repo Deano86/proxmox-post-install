@@ -435,7 +435,8 @@ interactive_main() {
     local choice
     require_command whiptail
     while true; do
-        choice="$(menu "PVE $PVE_VERSION ($CODENAME)" "Choose an operation." \
+        choice="$(menu "$AUTHOR Edition | PVE $PVE_VERSION ($CODENAME)" \
+            "Created by $AUTHOR | github.com/Deano86/proxmox-post-install\n\nChoose an operation." \
             audit "Read-only audit" pve-repos "Configure PVE repositories" \
             ceph-repos "Configure Ceph repositories" nag-install "Install/update popup patch" \
             nag-remove "Remove patch and restore toolkit" ha "Manage HA services" \
