@@ -17,6 +17,11 @@ readonly BACKUP_ROOT="/var/backups/proxmox-post-install"
 readonly NAG_TARGET="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 readonly NAG_COMMAND="/usr/local/sbin/proxmox-no-subscription-nag"
 readonly NAG_HOOK="/etc/apt/apt.conf.d/99-proxmox-no-subscription-nag"
+readonly AUTO_UPDATE_COMMAND="/usr/local/sbin/proxmox-auto-update"
+readonly AUTO_UPDATE_CONFIG="/etc/default/proxmox-auto-update"
+readonly AUTO_UPDATE_SERVICE="/etc/systemd/system/proxmox-auto-update.service"
+readonly AUTO_UPDATE_TIMER="/etc/systemd/system/proxmox-auto-update.timer"
+readonly AUTO_UPDATE_LOG="/var/log/proxmox-auto-update.log"
 
 PVE_MAJOR=""
 PVE_VERSION=""
@@ -799,6 +804,224 @@ remove_nag_patch() {
     else
         say "Official proxmoxlib.js restored."
     fi
+}
+
+
+write_auto_update_worker() {
+    cat >"$AUTO_UPDATE_COMMAND" <<'AUTO_UPDATE_WORKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly CONFIG="/etc/default/proxmox-auto-update"
+readonly LOG_FILE="/var/log/proxmox-auto-update.log"
+readonly LOCK_FILE="/run/lock/proxmox-auto-update.lock"
+MODE="check"
+[[ -r $CONFIG ]] && source "$CONFIG"
+
+install -d -m 0755 "$(dirname "$LOCK_FILE")"
+touch "$LOG_FILE"
+chmod 0640 "$LOG_FILE"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    printf '%s Another update run is active; exiting.\n' "$(date --iso-8601=seconds)" >>"$LOG_FILE"
+    exit 0
+fi
+exec >>"$LOG_FILE" 2>&1
+
+log() { printf '%s %s\n' "$(date --iso-8601=seconds)" "$*"; }
+trap 'log "FAILED at line $LINENO with exit code $?"' ERR
+
+log "Starting Proxmox automated update worker in mode=$MODE"
+
+root_free_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
+if [[ ${root_free_kb:-0} -lt 4194304 ]]; then
+    log "ABORT: less than 4 GiB is free on the root filesystem."
+    exit 1
+fi
+if [[ -n $(dpkg --audit 2>&1) ]]; then
+    log "ABORT: dpkg reports incomplete package operations."
+    dpkg --audit || true
+    exit 1
+fi
+
+apt-get update
+apt-get check
+
+case "$MODE" in
+    check)
+        log "Available dist-upgrade simulation follows."
+        apt-get --simulate dist-upgrade
+        ;;
+    install)
+        if [[ -f /etc/pve/corosync.conf ]] &&
+            ! pvecm status 2>/dev/null | grep -Eq 'Quorate:[[:space:]]+Yes'; then
+            log "ABORT: cluster configuration exists but quorum is unavailable."
+            exit 1
+        fi
+        log "Installing updates with apt-get dist-upgrade; automatic reboot is disabled."
+        DEBIAN_FRONTEND=noninteractive \
+            apt-get -y -o Dpkg::Options::="--force-confold" dist-upgrade
+        if [[ -e /var/run/reboot-required ]]; then
+            log "NOTICE: updates completed and a reboot is required."
+        else
+            log "Updates completed; no reboot-required marker is present."
+        fi
+        ;;
+    *)
+        log "ABORT: unsupported MODE=$MODE"
+        exit 64
+        ;;
+esac
+log "Automated update worker finished successfully."
+AUTO_UPDATE_WORKER
+    chmod 0755 "$AUTO_UPDATE_COMMAND"
+}
+
+backup_auto_update_files() {
+    local backup file
+    backup="$BACKUP_ROOT/auto-update-config-$(date -u +%Y%m%dT%H%M%SZ)"
+    install -d -m 0750 "$backup"
+    for file in "$AUTO_UPDATE_COMMAND" "$AUTO_UPDATE_CONFIG" "$AUTO_UPDATE_SERVICE" \
+        "$AUTO_UPDATE_TIMER" /etc/logrotate.d/proxmox-auto-update; do
+        [[ -e $file ]] && cp -a -- "$file" "$backup/"
+    done
+    printf '%s\n' "$backup"
+}
+
+install_auto_update_timer() {
+    local mode="$1" calendar="$2" backup
+    if is_dry_run; then
+        preview "Would install automated-update mode=$mode with OnCalendar=$calendar"
+        preview "Would enable proxmox-auto-update.timer; automatic reboot would remain disabled"
+        return 0
+    fi
+
+    backup="$(backup_auto_update_files)"
+    write_auto_update_worker
+    printf 'MODE="%s"\n' "$mode" >"$AUTO_UPDATE_CONFIG"
+    chmod 0644 "$AUTO_UPDATE_CONFIG"
+
+    cat >"$AUTO_UPDATE_SERVICE" <<EOF
+[Unit]
+Description=Guarded Proxmox VE update check/installer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$AUTO_UPDATE_COMMAND
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity
+EOF
+
+    cat >"$AUTO_UPDATE_TIMER" <<EOF
+[Unit]
+Description=Scheduled guarded Proxmox VE updates
+
+[Timer]
+OnCalendar=$calendar
+RandomizedDelaySec=30m
+Persistent=true
+Unit=proxmox-auto-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    cat >/etc/logrotate.d/proxmox-auto-update <<EOF
+$AUTO_UPDATE_LOG {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+}
+EOF
+    chmod 0644 "$AUTO_UPDATE_SERVICE" "$AUTO_UPDATE_TIMER" /etc/logrotate.d/proxmox-auto-update
+    systemctl daemon-reload
+    systemctl enable --now proxmox-auto-update.timer
+    say "Installed automated-update mode=$mode with schedule: $calendar"
+    say "Previous configuration backup: $backup"
+    systemctl list-timers proxmox-auto-update.timer --no-pager || true
+}
+
+show_auto_update_status() {
+    printf '\n=== Automated update status ===\n'
+    if [[ -r $AUTO_UPDATE_CONFIG ]]; then
+        cat "$AUTO_UPDATE_CONFIG"
+    else
+        printf 'Configuration: NOT INSTALLED\n'
+    fi
+    systemctl status proxmox-auto-update.timer --no-pager 2>/dev/null || true
+    systemctl list-timers proxmox-auto-update.timer --no-pager 2>/dev/null || true
+    if [[ -f $AUTO_UPDATE_LOG ]]; then
+        printf '\n=== Recent update log ===\n'
+        tail -n 30 "$AUTO_UPDATE_LOG"
+    fi
+    printf '\n'
+}
+
+run_auto_update_now() {
+    if [[ ! -x $AUTO_UPDATE_COMMAND || ! -r $AUTO_UPDATE_CONFIG ]]; then
+        message "Not installed" "Configure automated updates before running the worker."
+        return 0
+    fi
+    if is_dry_run; then
+        preview "Would start proxmox-auto-update.service now using $(cat "$AUTO_UPDATE_CONFIG")"
+        return 0
+    fi
+    confirm "Run update worker" \
+        "Run the configured update worker now?\n\nCurrent configuration: $(cat "$AUTO_UPDATE_CONFIG")" || return 0
+    systemctl start proxmox-auto-update.service
+    show_auto_update_status
+}
+
+remove_auto_update_timer() {
+    local backup
+    confirm "Disable automated updates" \
+        "Disable and remove the automated-update timer, worker, and configuration?\n\nLogs will be retained." || return 0
+    if is_dry_run; then
+        preview "Would disable and remove the automated-update timer, worker, and configuration"
+        return 0
+    fi
+    backup="$(backup_auto_update_files)"
+    systemctl disable --now proxmox-auto-update.timer 2>/dev/null || true
+    rm -f -- "$AUTO_UPDATE_COMMAND" "$AUTO_UPDATE_CONFIG" "$AUTO_UPDATE_SERVICE" \
+        "$AUTO_UPDATE_TIMER" /etc/logrotate.d/proxmox-auto-update
+    systemctl daemon-reload
+    say "Automated updates removed. Configuration backup: $backup"
+    say "Log retained at: $AUTO_UPDATE_LOG"
+}
+
+manage_auto_updates() {
+    local choice
+    choice="$(menu "Automated host updates" \
+        "Check-only is recommended. Install mode performs guarded dist-upgrade and never reboots automatically." \
+        status "Show timer, configuration, and recent log" \
+        daily-check "Check daily at 06:00; install nothing" \
+        weekly-check "Check Sundays at 04:00; install nothing" \
+        weekly-install "Install updates Sundays at 04:00; never reboot" \
+        run-now "Run the configured worker now" \
+        disable "Disable and remove automated updates" \
+        leave "Return to main menu" || printf leave)"
+
+    case "$choice" in
+        status) show_auto_update_status; read -r -p "Press Enter to return..." _ ;;
+        daily-check) install_auto_update_timer check "*-*-* 06:00:00" ;;
+        weekly-check) install_auto_update_timer check "Sun *-*-* 04:00:00" ;;
+        weekly-install)
+            if confirm "Automated installation warning" \
+                "Automatically installing hypervisor updates carries operational risk.\n\nThe worker checks disk, dpkg, APT, and cluster quorum and never reboots. Continue?"; then
+                install_auto_update_timer install "Sun *-*-* 04:00:00"
+            fi
+            ;;
+        run-now) run_auto_update_now ;;
+        disable) remove_auto_update_timer ;;
+        leave) return 0 ;;
+    esac
 }
 
 manage_ha() {
