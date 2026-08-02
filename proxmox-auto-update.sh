@@ -8,6 +8,7 @@ readonly CONFIG="/etc/default/proxmox-auto-update"
 readonly LOG_FILE="/var/log/proxmox-auto-update.log"
 readonly LOCK_FILE="/run/lock/proxmox-auto-update.lock"
 MODE="check"
+# shellcheck source=/dev/null
 [[ -r $CONFIG ]] && source "$CONFIG"
 
 install -d -m 0755 "$(dirname "$LOCK_FILE")"
