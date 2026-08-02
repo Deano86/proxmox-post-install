@@ -1082,9 +1082,11 @@ interactive_main() {
             health "Run host health checks" audit "Read-only configuration audit" \
             report "Create a mode-0600 diagnostic report" migrate "Migrate PVE 9 repositories to deb822" \
             pve-repos "Configure PVE repositories" ceph-repos "Configure Ceph repositories" \
-            restore "Restore a repository backup" nag-install "Install/update popup patch" \
-            nag-remove "Remove patch and restore toolkit" ha "Manage HA services" \
-            update "Interactive system update" reboot "Reboot host" exit "Exit" || printf exit)"
+            restore "Restore a repository backup" self-update "Update this script from GitHub" \
+            auto-updates "Configure guarded automated host updates" \
+            nag-install "Install/update popup patch" nag-remove "Remove patch and restore toolkit" \
+            ha "Manage HA services" update "Interactive system update" \
+            reboot "Reboot host" exit "Exit" || printf exit)"
         case "$choice" in
             health) run_health_check; read -r -p "Press Enter to return..." _ ;;
             audit) show_audit; read -r -p "Press Enter to return..." _ ;;
@@ -1093,6 +1095,8 @@ interactive_main() {
             pve-repos) configure_pve_repositories ;;
             ceph-repos) configure_ceph_repositories ;;
             restore) restore_repository_backup ;;
+            self-update) self_update_script ;;
+            auto-updates) manage_auto_updates ;;
             nag-install)
                 if confirm "Popup patch" "Install the targeted patch and APT hook?\n\nThis changes only the UI notification."; then
                     install_nag_patch
@@ -1120,6 +1124,8 @@ Options:
   --audit        Print the configuration audit
   --health       Run host health checks
   --report       Create a permission-restricted diagnostic report
+  --self-update  Validate, back up, and update this script from GitHub
+  --update-status Show automated host-update timer and recent log
   --help         Show this help
 EOF
 }
@@ -1137,6 +1143,8 @@ main() {
         --audit) show_audit ;;
         --health) run_health_check ;;
         --report) generate_diagnostic_report ;;
+        --self-update) self_update_script ;;
+        --update-status) show_auto_update_status ;;
         --help|-h) usage ;;
         *) usage >&2; exit 64 ;;
     esac
