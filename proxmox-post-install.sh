@@ -8,7 +8,9 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
-readonly APP_NAME="Proxmox Post Install"
+readonly AUTHOR="Deano86"
+readonly PROJECT_URL="https://github.com/Deano86/proxmox-post-install"
+readonly APP_NAME="Deano86's Proxmox Post Install"
 readonly BACKUP_ROOT="/var/backups/proxmox-post-install"
 readonly NAG_TARGET="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 readonly NAG_COMMAND="/usr/local/sbin/proxmox-no-subscription-nag"
@@ -114,7 +116,8 @@ show_audit() {
             nag_status="NOT PATCHED"
         fi
     fi
-    printf '\n=== Platform ===\nPVE: %s\nDebian: %s\nArchitecture: %s\nToolkit: %s\n' \
+    printf '\n=== %s ===\nProject: %s\n\n' "$APP_NAME" "$PROJECT_URL"
+    printf '=== Platform ===\nPVE: %s\nDebian: %s\nArchitecture: %s\nToolkit: %s\n' \
         "$PVE_VERSION" "$CODENAME" "$ARCH" "$toolkit"
     printf '\n=== APT sources ===\n'
     while IFS= read -r file; do
@@ -457,6 +460,9 @@ interactive_main() {
 
 usage() {
     cat <<'EOF'
+Deano86's Proxmox Post Install
+Project: https://github.com/Deano86/proxmox-post-install
+
 Usage: proxmox-post-install.sh [--interactive|--audit|--help]
 EOF
 }
