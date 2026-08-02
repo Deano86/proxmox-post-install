@@ -8,7 +8,7 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
-readonly VERSION="0.3.0"
+readonly SCRIPT_VERSION="0.3.1"
 readonly AUTHOR="Deano86"
 readonly PROJECT_URL="https://github.com/Deano86/proxmox-post-install"
 readonly SELF_UPDATE_URL="https://raw.githubusercontent.com/Deano86/proxmox-post-install/main/proxmox-post-install.sh"
@@ -134,7 +134,7 @@ show_audit() {
             nag_status="NOT PATCHED"
         fi
     fi
-    printf '\n=== %s v%s ===\nProject: %s\n\n' "$APP_NAME" "$VERSION" "$PROJECT_URL"
+    printf '\n=== %s v%s ===\nProject: %s\n\n' "$APP_NAME" "$SCRIPT_VERSION" "$PROJECT_URL"
     printf '=== Platform ===\nPVE: %s\nDebian: %s\nArchitecture: %s\nToolkit: %s\n' \
         "$PVE_VERSION" "$CODENAME" "$ARCH" "$toolkit"
     printf '\n=== APT sources ===\n'
@@ -628,7 +628,7 @@ generate_diagnostic_report() {
 
     umask 077
     {
-        printf '%s v%s\nGenerated: %s\n\n' "$APP_NAME" "$VERSION" "$(date -u --iso-8601=seconds)"
+        printf '%s v%s\nGenerated: %s\n\n' "$APP_NAME" "$SCRIPT_VERSION" "$(date -u --iso-8601=seconds)"
         show_audit
         run_health_check
         printf '\n=== Kernel and uptime ===\n'
@@ -681,24 +681,24 @@ self_update_script() {
         return 0
     fi
 
-    remote_version="$(sed -nE 's/^readonly VERSION="([^"]+)"/\1/p' "$temporary" | head -n1)"
+    remote_version="$(sed -nE 's/^readonly SCRIPT_VERSION="([^"]+)"/\1/p' "$temporary" | head -n1)"
     if [[ -z $remote_version ]]; then
         rm -f -- "$temporary"
-        message "Self-update blocked" "The downloaded script has no recognizable VERSION field."
+        message "Self-update blocked" "The downloaded script has no recognizable SCRIPT_VERSION field."
         return 0
     fi
-    if [[ $remote_version == "$VERSION" ]]; then
+    if [[ $remote_version == "$SCRIPT_VERSION" ]]; then
         rm -f -- "$temporary"
-        message "Already current" "Version $VERSION is already installed."
+        message "Already current" "Version $SCRIPT_VERSION is already installed."
         return 0
     fi
 
-    latest="$(printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | tail -n1)"
+    latest="$(printf '%s\n%s\n' "$SCRIPT_VERSION" "$remote_version" | sort -V | tail -n1)"
     if [[ $latest != "$remote_version" ]]; then
-        warn "Remote version $remote_version is older than installed version $VERSION."
+        warn "Remote version $remote_version is older than installed version $SCRIPT_VERSION."
     fi
     confirm "Update script" \
-        "Replace version $VERSION with version $remote_version?\n\nThe current script will be backed up first." || {
+        "Replace version $SCRIPT_VERSION with version $remote_version?\n\nThe current script will be backed up first." || {
         rm -f -- "$temporary"
         return 0
     }
@@ -708,7 +708,7 @@ self_update_script() {
     cp -a -- "$current_path" "$backup"
     install -m 0755 -- "$temporary" "$current_path"
     rm -f -- "$temporary"
-    say "Updated $current_path from v$VERSION to v$remote_version"
+    say "Updated $current_path from v$SCRIPT_VERSION to v$remote_version"
     say "Previous version retained at: $backup"
     message "Update complete" \
         "Updated to version $remote_version.\n\nExit and run the script again to use the new version."
